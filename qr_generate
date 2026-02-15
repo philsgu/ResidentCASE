@@ -1,0 +1,27 @@
+import qrcode
+import os
+
+# 1. Create the folder if it doesn't exist
+folder_name = "qr_images"
+if not os.path.exists(folder_name):
+    os.makedirs(folder_name)
+
+# 2. Create the text file and generate QR codes in one go
+file_path = "url_txt"
+
+with open(file_path, "w") as f:
+    for i in range(1, 11):
+        url = f"https://tally.so/r/b5xGbZ?case_number={i}"
+        
+        # Write to the text file
+        f.write(f"{url}\n")
+        
+        # Generate the QR Code
+        qr_img = qrcode.make(url)
+        
+        # Save to the specific folder with a unique name
+        # We use os.path.join to ensure the file path works on Windows/Mac/Linux
+        file_name = os.path.join(folder_name, f"qr_case_{i}.png")
+        qr_img.save(file_name)
+
+print(f"Finished! Check the '{folder_name}' folder for your images.")
