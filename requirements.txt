@@ -1,2 +1,6 @@
+# Core dependencies for ResidentCASE app
 streamlit>=1.54.0
 requests>=2.31.0
+
+# Note: re, typing, and os are Python standard library modules
+# and don't need to be listed here
