@@ -28,6 +28,9 @@ wheels/
 # Keep the template for reference
 !.streamlit/secrets.toml.template
 
+# Debug files (contain API keys)
+debug_*.py
+
 # IDEs
 .vscode/
 .idea/
