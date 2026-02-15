@@ -442,154 +442,385 @@ def main():
         return
 
     # Sidebar navigation
-    st.sidebar.title("📋 Case Navigation")
-    st.sidebar.markdown("Select a case to review:")
+    st.sidebar.title("📋 Navigation")
 
-    # Create case selection
-    case_options = [f"Case {i+1}" for i in range(len(cases))]
-    selected_case_idx = st.sidebar.radio(
-        "Cases",
-        range(len(cases)),
-        format_func=lambda x: f"📌 {case_options[x]}: {cases[x]['title'].replace('Case ' + str(x+1) + ':', '').strip()[:30]}...",
+    # Add view selection
+    view_mode = st.sidebar.radio(
+        "Select View:",
+        ["📊 Overall Leaderboard", "📋 Individual Cases"],
+        index=1,  # Default to Cases view
     )
 
-    # Display selected case
-    selected_case = cases[selected_case_idx]
+    st.sidebar.markdown("---")
 
-    st.header(selected_case["title"])
-
-    # Create tabs
-    tab1, tab2, tab3 = st.tabs(
-        ["📋 Case Description", "💊 Management Considerations", "👥 Team Responses"]
-    )
-
-    # Tab 1: Description
-    with tab1:
-        st.markdown(selected_case["description"])
-
-    # Tab 2: Management
-    with tab2:
-        st.markdown(selected_case["management"])
-
-    # Tab 3: Team Responses
-    with tab3:
-        st.subheader("Team Responses & AI Evaluation")
-
-        # Add option to manually test with custom response
-        with st.expander("🧪 Test with Custom Response (Optional)"):
-            st.markdown(
-                "Enter a response below to get AI evaluation without using Tally API:"
-            )
-            test_team_name = st.text_input(
-                "Team Name", value="Test Team", key=f"test_team_{selected_case_idx}"
-            )
-            test_response = st.text_area(
-                "Management Response",
-                height=150,
-                placeholder="Enter the team's management plan here...",
-                key=f"test_response_{selected_case_idx}",
-            )
-            if st.button(
-                "🤖 Evaluate This Response", key=f"eval_btn_{selected_case_idx}"
-            ):
-                if test_response.strip():
-                    with st.spinner("AI is evaluating the response..."):
-                        evaluation = rate_response_with_gemini(
-                            selected_case["description"],
-                            selected_case["management"],
-                            test_response,
-                        )
-                    test_data = {
-                        "team": test_team_name,
-                        "response": test_response,
-                        "submitted_at": "2026-02-13 (Manual Test)",
-                    }
-                    st.markdown("---")
-                    display_team_response(test_data["team"], test_data, evaluation)
-                else:
-                    st.warning("Please enter a response to evaluate.")
-
+    if view_mode == "📊 Overall Leaderboard":
+        # Display overall leaderboard across all cases
+        st.header("🏆 Overall Team Leaderboard")
+        st.markdown("*Aggregate scores across all 10 diabetes management cases*")
+        st.success(
+            "⚡ **Fast Mode**: Using cached evaluations from individual case pages for instant display"
+        )
         st.markdown("---")
-        st.markdown("### 📊 Tally.so Submissions")
 
-        with st.spinner("Loading team responses from Tally.so..."):
-            # Fetch responses
-            all_responses = fetch_tally_responses()
+        # Fetch all responses
+        all_responses = fetch_tally_responses()
 
-            if not all_responses:
-                # Show sample/demo response
-                st.markdown("### 📝 Demo Mode - Sample Responses")
-                st.info(
-                    "Showing sample team responses for demonstration purposes. Use the 'Test with Custom Response' section above to evaluate actual responses."
+        if not all_responses:
+            st.info("⚠️ No team responses found. Using demo mode.")
+            st.markdown(
+                "This page will show overall standings once teams submit responses."
+            )
+        else:
+            # Calculate total scores for each team across all cases
+            # ONLY use cached evaluations for fast display
+            team_scores = (
+                {}
+            )  # {team_name: {"total": score, "cases": {case_num: score}}}
+            unevaluated_responses = []  # Track responses that need evaluation
+
+            for case_idx in range(len(cases)):
+                case_number = case_idx + 1
+                case_responses = categorize_responses_by_case(
+                    all_responses, case_number
                 )
 
-                # Generate demo responses relevant to the case
-                demo_responses = [
-                    {
-                        "team": "Demo Team Alpha",
-                        "response": """For this patient, I would:
+                if case_responses:
+                    for response_data in case_responses:
+                        team_name = response_data["team"]
+                        eval_cache_key = f"cache_{case_number}_{team_name}"
+
+                        # ONLY use cached evaluations - don't run AI here
+                        if eval_cache_key in st.session_state:
+                            evaluation = st.session_state[eval_cache_key]
+                            score = evaluation["score"]
+
+                            # Initialize team if not exists
+                            if team_name not in team_scores:
+                                team_scores[team_name] = {
+                                    "total": 0,
+                                    "cases": {},
+                                    "count": 0,
+                                }
+
+                            team_scores[team_name]["cases"][case_number] = score
+                            team_scores[team_name]["total"] += score
+                            team_scores[team_name]["count"] += 1
+                        else:
+                            # Track unevaluated responses
+                            unevaluated_responses.append(
+                                {
+                                    "case_idx": case_idx,
+                                    "case_number": case_number,
+                                    "team_name": team_name,
+                                    "response_data": response_data,
+                                }
+                            )
+
+            # Show info about unevaluated responses
+            if unevaluated_responses:
+                st.info(
+                    f"⚡ **Fast Display Mode**: Showing {len(team_scores)} team(s) with previously evaluated scores. "
+                    f"{len(unevaluated_responses)} response(s) not yet evaluated."
+                )
+
+                # Add button to evaluate remaining responses
+                if st.button(
+                    f"🤖 Evaluate {len(unevaluated_responses)} Remaining Response(s)",
+                    key="eval_remaining_leaderboard",
+                    type="primary",
+                ):
+                    progress_text = st.empty()
+                    progress_bar = st.progress(0)
+
+                    for idx, item in enumerate(unevaluated_responses):
+                        progress_text.text(
+                            f"Evaluating {item['team_name']} for Case {item['case_number']}... ({idx+1}/{len(unevaluated_responses)})"
+                        )
+                        progress_bar.progress((idx + 1) / len(unevaluated_responses))
+
+                        # Evaluate and cache
+                        evaluation = rate_response_with_gemini(
+                            cases[item["case_idx"]]["description"],
+                            cases[item["case_idx"]]["management"],
+                            item["response_data"]["response"],
+                        )
+                        eval_cache_key = (
+                            f"cache_{item['case_number']}_{item['team_name']}"
+                        )
+                        st.session_state[eval_cache_key] = evaluation
+
+                    progress_text.empty()
+                    progress_bar.empty()
+                    st.success("✅ All evaluations complete! Refreshing leaderboard...")
+                    st.rerun()
+
+                st.markdown("---")
+
+            if not team_scores:
+                st.warning(
+                    "⚠️ No evaluated responses found yet. Please:\n"
+                    "1. Go to individual case pages and click 'Evaluate All Teams'\n"
+                    "2. OR click the button above to evaluate all pending responses"
+                )
+            else:
+                # Sort teams by total score
+                sorted_teams = sorted(
+                    team_scores.items(), key=lambda x: x[1]["total"], reverse=True
+                )
+
+                # Display winner announcement
+                winner_name = sorted_teams[0][0]
+                winner_total = sorted_teams[0][1]["total"]
+                winner_count = sorted_teams[0][1]["count"]
+                winner_avg = winner_total / winner_count if winner_count > 0 else 0
+
+                st.balloons()
+                st.markdown(
+                    f"""
+                <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
+                            color: white; padding: 30px; border-radius: 15px; text-align: center; margin: 20px 0;">
+                    <h1 style="margin: 0; font-size: 3em;">🥇 {winner_name}</h1>
+                    <h2 style="margin: 10px 0 0 0;">Total Score: {winner_total:,} points</h2>
+                    <p style="margin: 5px 0 0 0; font-size: 1.2em;">Average: {winner_avg:.1f}/100 across {winner_count} case(s)</p>
+                </div>
+                """,
+                    unsafe_allow_html=True,
+                )
+
+                st.markdown("---")
+                st.markdown("### 📊 Complete Rankings")
+
+                # Create columns for medals
+                if len(sorted_teams) >= 3:
+                    col1, col2, col3 = st.columns(3)
+
+                    for idx, col in enumerate([col1, col2, col3]):
+                        if idx < len(sorted_teams):
+                            team_name, data = sorted_teams[idx]
+                            medal = ["🥇", "🥈", "🥉"][idx]
+                            avg_score = (
+                                data["total"] / data["count"]
+                                if data["count"] > 0
+                                else 0
+                            )
+
+                            with col:
+                                st.markdown(
+                                    f"""
+                                <div style="background: {'#FFD700' if idx == 0 else '#C0C0C0' if idx == 1 else '#CD7F32'}30; 
+                                            padding: 20px; border-radius: 10px; text-align: center;">
+                                    <h2 style="margin: 0;">{medal}</h2>
+                                    <h3 style="margin: 10px 0;">{team_name}</h3>
+                                    <p style="margin: 5px 0; font-size: 1.5em; font-weight: bold;">{data["total"]:,} pts</p>
+                                    <p style="margin: 5px 0;">Avg: {avg_score:.1f}/100</p>
+                                    <p style="margin: 5px 0; font-size: 0.9em;">{data["count"]} case(s)</p>
+                                </div>
+                                """,
+                                    unsafe_allow_html=True,
+                                )
+
+                    st.markdown("---")
+
+                # Detailed standings table
+                st.markdown("### 📋 Detailed Standings")
+
+                for idx, (team_name, data) in enumerate(sorted_teams):
+                    rank = idx + 1
+                    avg_score = (
+                        data["total"] / data["count"] if data["count"] > 0 else 0
+                    )
+
+                    medal = (
+                        "🥇"
+                        if rank == 1
+                        else ("🥈" if rank == 2 else "🥉" if rank == 3 else f"#{rank}")
+                    )
+
+                    with st.expander(
+                        f"{medal} {team_name} - Total: {data['total']:,} pts (Avg: {avg_score:.1f}/100)",
+                        expanded=(rank <= 3),
+                    ):
+                        st.markdown(
+                            f"**Cases Completed:** {data['count']}/{len(cases)}"
+                        )
+
+                        # Show scores per case
+                        case_cols = st.columns(min(5, len(data["cases"])))
+                        case_numbers = sorted(data["cases"].keys())
+
+                        for i, case_num in enumerate(case_numbers):
+                            col_idx = i % 5
+                            with case_cols[col_idx]:
+                                score = data["cases"][case_num]
+                                score_color = (
+                                    "🟢"
+                                    if score >= 80
+                                    else "🟡" if score >= 60 else "🔴"
+                                )
+                                st.metric(
+                                    label=f"Case {case_num}",
+                                    value=f"{score}/100",
+                                    delta=f"{score_color}",
+                                )
+
+                        # Progress bar
+                        completion_rate = (data["count"] / len(cases)) * 100
+                        st.progress(data["count"] / len(cases))
+                        st.caption(
+                            f"Completion: {completion_rate:.0f}% ({data['count']}/{len(cases)} cases)"
+                        )
+
+    else:
+        # Original case view
+        st.sidebar.markdown("Select a case to review:")
+
+        # Create case selection
+        case_options = [f"Case {i+1}" for i in range(len(cases))]
+        selected_case_idx = st.sidebar.radio(
+            "Cases",
+            range(len(cases)),
+            format_func=lambda x: f"📌 {case_options[x]}: {cases[x]['title'].replace('Case ' + str(x+1) + ':', '').strip()[:30]}...",
+        )
+
+        # Display selected case
+        selected_case = cases[selected_case_idx]
+
+        st.header(selected_case["title"])
+
+        # Create tabs
+        tab1, tab2, tab3 = st.tabs(
+            ["📋 Case Description", "💊 Management Considerations", "👥 Team Responses"]
+        )
+
+        # Tab 1: Description
+        with tab1:
+            st.markdown(selected_case["description"])
+
+        # Tab 2: Management
+        with tab2:
+            st.markdown(selected_case["management"])
+
+        # Tab 3: Team Responses
+        with tab3:
+            st.subheader("Team Responses & AI Evaluation")
+
+            # Add option to manually test with custom response
+            with st.expander("🧪 Test with Custom Response (Optional)"):
+                st.markdown(
+                    "Enter a response below to get AI evaluation without using Tally API:"
+                )
+                test_team_name = st.text_input(
+                    "Team Name", value="Test Team", key=f"test_team_{selected_case_idx}"
+                )
+                test_response = st.text_area(
+                    "Management Response",
+                    height=150,
+                    placeholder="Enter the team's management plan here...",
+                    key=f"test_response_{selected_case_idx}",
+                )
+                if st.button(
+                    "🤖 Evaluate This Response", key=f"eval_btn_{selected_case_idx}"
+                ):
+                    if test_response.strip():
+                        with st.spinner("AI is evaluating the response..."):
+                            evaluation = rate_response_with_gemini(
+                                selected_case["description"],
+                                selected_case["management"],
+                                test_response,
+                            )
+                        test_data = {
+                            "team": test_team_name,
+                            "response": test_response,
+                            "submitted_at": "2026-02-13 (Manual Test)",
+                        }
+                        st.markdown("---")
+                        display_team_response(test_data["team"], test_data, evaluation)
+                    else:
+                        st.warning("Please enter a response to evaluate.")
+
+            st.markdown("---")
+            st.markdown("### 📊 Tally.so Submissions")
+
+            with st.spinner("Loading team responses from Tally.so..."):
+                # Fetch responses
+                all_responses = fetch_tally_responses()
+
+                if not all_responses:
+                    # Show sample/demo response
+                    st.markdown("### 📝 Demo Mode - Sample Responses")
+                    st.info(
+                        "Showing sample team responses for demonstration purposes. Use the 'Test with Custom Response' section above to evaluate actual responses."
+                    )
+
+                    # Generate demo responses relevant to the case
+                    demo_responses = [
+                        {
+                            "team": "Demo Team Alpha",
+                            "response": """For this patient, I would:
 1. Start with Metformin 500mg twice daily as first-line therapy
 2. Implement lifestyle modifications including diet and exercise
 3. Schedule follow-up in 3 months to reassess HbA1c
 4. Consider referral to diabetes education
 5. Monitor for complications""",
-                        "submitted_at": "2026-02-13",
-                    },
-                    {
-                        "team": "Demo Team Beta",
-                        "response": """My management approach:
+                            "submitted_at": "2026-02-13",
+                        },
+                        {
+                            "team": "Demo Team Beta",
+                            "response": """My management approach:
 - Initiate metformin and titrate to maximum tolerated dose
 - Refer to DSMES for comprehensive education
 - Consider adding GLP-1 RA if cardiovascular disease present
 - Implement evidence-based lifestyle interventions
 - Monitor HbA1c quarterly, adjust therapy as needed""",
-                        "submitted_at": "2026-02-13",
-                    },
-                ]
+                            "submitted_at": "2026-02-13",
+                        },
+                    ]
 
-                # First, display all demo team responses immediately
-                st.markdown("---")
-                st.markdown("### 📋 Demo Team Responses")
+                    # First, display all demo team responses immediately
+                    st.markdown("---")
+                    st.markdown("### 📋 Demo Team Responses")
 
-                # Create tabs for each team (without scores initially)
-                tab_names = [demo["team"] for demo in demo_responses]
-                tabs = st.tabs(tab_names)
+                    # Create tabs for each team (without scores initially)
+                    tab_names = [demo["team"] for demo in demo_responses]
+                    tabs = st.tabs(tab_names)
 
-                # Display each team's response in its tab
-                for tab, demo_response in zip(tabs, demo_responses):
-                    with tab:
-                        st.markdown(f"### 👥 {demo_response['team']}")
-                        with st.expander("📝 Team Response", expanded=True):
-                            st.markdown(demo_response["response"])
+                    # Display each team's response in its tab
+                    for tab, demo_response in zip(tabs, demo_responses):
+                        with tab:
+                            st.markdown(f"### 👥 {demo_response['team']}")
+                            with st.expander("📝 Team Response", expanded=True):
+                                st.markdown(demo_response["response"])
 
-                        if demo_response.get("submitted_at"):
-                            st.caption(f"Submitted: {demo_response['submitted_at']}")
+                            if demo_response.get("submitted_at"):
+                                st.caption(
+                                    f"Submitted: {demo_response['submitted_at']}"
+                                )
 
-                # AI Evaluation Section
-                st.markdown("---")
-                st.markdown("### 🤖 AI Evaluation")
+                    # AI Evaluation Section
+                    st.markdown("---")
+                    st.markdown("### 🤖 AI Evaluation")
 
-                # Use session state for demo evaluation
-                demo_eval_key = f"demo_evaluated_case_{selected_case_idx}"
-                if demo_eval_key not in st.session_state:
-                    st.session_state[demo_eval_key] = False
-                    st.session_state[f"demo_eval_data_{selected_case_idx}"] = []
+                    # Use session state for demo evaluation
+                    demo_eval_key = f"demo_evaluated_case_{selected_case_idx}"
+                    if demo_eval_key not in st.session_state:
+                        st.session_state[demo_eval_key] = False
+                        st.session_state[f"demo_eval_data_{selected_case_idx}"] = []
 
-                # Button to trigger evaluation
-                if not st.session_state[demo_eval_key]:
-                    st.info(
-                        f"💡 Click below to evaluate **all {len(demo_responses)} demo team(s)** at once using AI."
-                    )
+                    # Button to trigger evaluation
+                    if not st.session_state[demo_eval_key]:
+                        st.info(
+                            f"💡 Click below to evaluate **all {len(demo_responses)} demo team(s)** at once using AI."
+                        )
 
-                    col1, col2, col3 = st.columns([1, 2, 1])
-                    with col2:
-                        if st.button(
-                            f"🚀 Evaluate All {len(demo_responses)} Team(s) Now",
-                            key=f"demo_eval_btn_{selected_case_idx}",
-                            type="primary",
-                            use_container_width=True,
-                        ):
-                            evaluated_teams = []
+                        col1, col2, col3 = st.columns([1, 2, 1])
+                        with col2:
+                            if st.button(
+                                f"🚀 Evaluate All {len(demo_responses)} Team(s) Now",
+                                key=f"demo_eval_btn_{selected_case_idx}",
+                                type="primary",
+                                use_container_width=True,
+                            ):
+                                evaluated_teams = []
 
                             # Show progress
                             progress_text = st.empty()
@@ -629,164 +860,11 @@ def main():
                             )
                             st.rerun()
 
-                # Display evaluation results if available
-                if st.session_state[demo_eval_key]:
-                    evaluated_teams = st.session_state[
-                        f"demo_eval_data_{selected_case_idx}"
-                    ]
-
-                    # Display leaderboard
-                    st.success(
-                        f"✅ AI evaluation completed for all {len(evaluated_teams)} team(s)!"
-                    )
-                    st.markdown("### 🏆 Leaderboard")
-
-                    leaderboard_cols = st.columns(len(evaluated_teams))
-                    for idx, team_data in enumerate(evaluated_teams):
-                        with leaderboard_cols[idx]:
-                            medal = "🥇" if idx == 0 else "🥈"
-                            st.metric(
-                                label=f"{medal} {team_data['team']}",
-                                value=f"{team_data['score']}/100",
-                            )
-
-                    st.markdown("---")
-                    st.markdown("### 📊 Detailed Evaluation (View One at a Time)")
-
-                    # Create tabs for each team with scores
-                    eval_tab_names = [
-                        f"{team_data['team']} ({team_data['score']}/100)"
-                        for team_data in evaluated_teams
-                    ]
-                    eval_tabs = st.tabs(eval_tab_names)
-
-                    # Display each team in its tab
-                    for eval_tab, team_data in zip(eval_tabs, evaluated_teams):
-                        with eval_tab:
-                            display_team_response(
-                                team_data["team"],
-                                team_data["response_data"],
-                                team_data["evaluation"],
-                            )
-
-                    # Add button to re-evaluate
-                    st.markdown("---")
-                    col1, col2, col3 = st.columns([1, 2, 1])
-                    with col2:
-                        if st.button(
-                            "🔄 Re-evaluate All Teams",
-                            key=f"demo_reeval_btn_{selected_case_idx}",
-                            use_container_width=True,
-                        ):
-                            st.session_state[demo_eval_key] = False
-                            st.session_state[f"demo_eval_data_{selected_case_idx}"] = []
-                            st.rerun()
-
-            else:
-                # Filter responses for current case
-                case_number = selected_case_idx + 1
-                case_responses = categorize_responses_by_case(
-                    all_responses, case_number
-                )
-
-                if not case_responses:
-                    st.info(f"No responses found for Case {case_number} yet.")
-                else:
-                    st.success(
-                        f"Found {len(case_responses)} team response(s) for this case"
-                    )
-
-                    # Use session state to track if evaluation is done
-                    eval_key = f"evaluated_case_{case_number}"
-                    if eval_key not in st.session_state:
-                        st.session_state[eval_key] = False
-                        st.session_state[f"eval_data_{case_number}"] = []
-
-                    # First show team responses in tabs
-                    st.markdown("---")
-                    st.markdown("### 📋 Team Responses")
-
-                    tab_names = [
-                        response_data["team"] for response_data in case_responses
-                    ]
-                    tabs = st.tabs(tab_names)
-
-                    for tab, response_data in zip(tabs, case_responses):
-                        with tab:
-                            st.markdown(f"### 👥 {response_data['team']}")
-                            with st.expander("📝 Team Response", expanded=True):
-                                st.markdown(response_data["response"])
-
-                            if response_data.get("submitted_at"):
-                                st.caption(
-                                    f"Submitted: {response_data['submitted_at']}"
-                                )
-
-                    # AI Evaluation Section
-                    st.markdown("---")
-                    st.markdown("### 🤖 AI Evaluation")
-
-                    # Button to trigger evaluation (evaluate all at once)
-                    if not st.session_state[eval_key]:
-                        st.info(
-                            f"💡 Click below to evaluate **all {len(case_responses)} team(s)** at once using AI."
-                        )
-
-                        col1, col2, col3 = st.columns([1, 2, 1])
-                        with col2:
-                            if st.button(
-                                f"🚀 Evaluate All {len(case_responses)} Team(s) Now",
-                                key=f"eval_btn_{case_number}",
-                                type="primary",
-                                use_container_width=True,
-                            ):
-                                evaluated_teams = []
-
-                                # Show progress
-                                progress_text = st.empty()
-                                progress_bar = st.progress(0)
-
-                                for idx, response_data in enumerate(case_responses):
-                                    progress_text.text(
-                                        f"Evaluating {response_data['team']}... ({idx+1}/{len(case_responses)})"
-                                    )
-                                    progress_bar.progress(
-                                        (idx + 1) / len(case_responses)
-                                    )
-
-                                    evaluation = rate_response_with_gemini(
-                                        selected_case["description"],
-                                        selected_case["management"],
-                                        response_data["response"],
-                                    )
-                                    evaluated_teams.append(
-                                        {
-                                            "team": response_data["team"],
-                                            "response_data": response_data,
-                                            "evaluation": evaluation,
-                                            "score": evaluation["score"],
-                                        }
-                                    )
-
-                                # Clear progress indicators
-                                progress_text.empty()
-                                progress_bar.empty()
-
-                                # Sort by score (highest first)
-                                evaluated_teams.sort(
-                                    key=lambda x: x["score"], reverse=True
-                                )
-
-                                # Store in session state
-                                st.session_state[eval_key] = True
-                                st.session_state[f"eval_data_{case_number}"] = (
-                                    evaluated_teams
-                                )
-                                st.rerun()
-
                     # Display evaluation results if available
-                    if st.session_state[eval_key]:
-                        evaluated_teams = st.session_state[f"eval_data_{case_number}"]
+                    if st.session_state[demo_eval_key]:
+                        evaluated_teams = st.session_state[
+                            f"demo_eval_data_{selected_case_idx}"
+                        ]
 
                         # Display leaderboard
                         st.success(
@@ -794,17 +872,10 @@ def main():
                         )
                         st.markdown("### 🏆 Leaderboard")
 
-                        leaderboard_cols = st.columns(min(len(evaluated_teams), 3))
+                        leaderboard_cols = st.columns(len(evaluated_teams))
                         for idx, team_data in enumerate(evaluated_teams):
-                            col_idx = idx % 3
-                            with leaderboard_cols[col_idx]:
-                                medal = (
-                                    "🥇"
-                                    if idx == 0
-                                    else (
-                                        "🥈" if idx == 1 else "🥉" if idx == 2 else "📊"
-                                    )
-                                )
+                            with leaderboard_cols[idx]:
+                                medal = "🥇" if idx == 0 else "🥈"
                                 st.metric(
                                     label=f"{medal} {team_data['team']}",
                                     value=f"{team_data['score']}/100",
@@ -820,7 +891,7 @@ def main():
                         ]
                         eval_tabs = st.tabs(eval_tab_names)
 
-                        # Display each team in its tab with full evaluation
+                        # Display each team in its tab
                         for eval_tab, team_data in zip(eval_tabs, evaluated_teams):
                             with eval_tab:
                                 display_team_response(
@@ -835,12 +906,180 @@ def main():
                         with col2:
                             if st.button(
                                 "🔄 Re-evaluate All Teams",
-                                key=f"reeval_btn_{case_number}",
+                                key=f"demo_reeval_btn_{selected_case_idx}",
                                 use_container_width=True,
                             ):
-                                st.session_state[eval_key] = False
-                                st.session_state[f"eval_data_{case_number}"] = []
+                                st.session_state[demo_eval_key] = False
+                                st.session_state[
+                                    f"demo_eval_data_{selected_case_idx}"
+                                ] = []
                                 st.rerun()
+
+                else:
+                    # Filter responses for current case
+                    case_number = selected_case_idx + 1
+                    case_responses = categorize_responses_by_case(
+                        all_responses, case_number
+                    )
+
+                    if not case_responses:
+                        st.info(f"No responses found for Case {case_number} yet.")
+                    else:
+                        st.success(
+                            f"Found {len(case_responses)} team response(s) for this case"
+                        )
+
+                        # Use session state to track if evaluation is done
+                        eval_key = f"evaluated_case_{case_number}"
+                        if eval_key not in st.session_state:
+                            st.session_state[eval_key] = False
+                            st.session_state[f"eval_data_{case_number}"] = []
+
+                        # First show team responses in tabs
+                        st.markdown("---")
+                        st.markdown("### 📋 Team Responses")
+
+                        tab_names = [
+                            response_data["team"] for response_data in case_responses
+                        ]
+                        tabs = st.tabs(tab_names)
+
+                        for tab, response_data in zip(tabs, case_responses):
+                            with tab:
+                                st.markdown(f"### 👥 {response_data['team']}")
+                                with st.expander("📝 Team Response", expanded=True):
+                                    st.markdown(response_data["response"])
+
+                                if response_data.get("submitted_at"):
+                                    st.caption(
+                                        f"Submitted: {response_data['submitted_at']}"
+                                    )
+
+                        # AI Evaluation Section
+                        st.markdown("---")
+                        st.markdown("### 🤖 AI Evaluation")
+
+                        # Button to trigger evaluation (evaluate all at once)
+                        if not st.session_state[eval_key]:
+                            st.info(
+                                f"💡 Click below to evaluate **all {len(case_responses)} team(s)** at once using AI."
+                            )
+
+                            col1, col2, col3 = st.columns([1, 2, 1])
+                            with col2:
+                                if st.button(
+                                    f"🚀 Evaluate All {len(case_responses)} Team(s) Now",
+                                    key=f"eval_btn_{case_number}",
+                                    type="primary",
+                                    use_container_width=True,
+                                ):
+                                    evaluated_teams = []
+
+                                    # Show progress
+                                    progress_text = st.empty()
+                                    progress_bar = st.progress(0)
+
+                                    for idx, response_data in enumerate(case_responses):
+                                        progress_text.text(
+                                            f"Evaluating {response_data['team']}... ({idx+1}/{len(case_responses)})"
+                                        )
+                                        progress_bar.progress(
+                                            (idx + 1) / len(case_responses)
+                                        )
+
+                                        evaluation = rate_response_with_gemini(
+                                            selected_case["description"],
+                                            selected_case["management"],
+                                            response_data["response"],
+                                        )
+                                        evaluated_teams.append(
+                                            {
+                                                "team": response_data["team"],
+                                                "response_data": response_data,
+                                                "evaluation": evaluation,
+                                                "score": evaluation["score"],
+                                            }
+                                        )
+
+                                    # Clear progress indicators
+                                    progress_text.empty()
+                                    progress_bar.empty()
+
+                                    # Sort by score (highest first)
+                                    evaluated_teams.sort(
+                                        key=lambda x: x["score"], reverse=True
+                                    )
+
+                                    # Store in session state
+                                    st.session_state[eval_key] = True
+                                    st.session_state[f"eval_data_{case_number}"] = (
+                                        evaluated_teams
+                                    )
+                                    st.rerun()
+
+                        # Display evaluation results if available
+                        if st.session_state[eval_key]:
+                            evaluated_teams = st.session_state[
+                                f"eval_data_{case_number}"
+                            ]
+
+                            # Display leaderboard
+                            st.success(
+                                f"✅ AI evaluation completed for all {len(evaluated_teams)} team(s)!"
+                            )
+                            st.markdown("### 🏆 Leaderboard")
+
+                            leaderboard_cols = st.columns(min(len(evaluated_teams), 3))
+                            for idx, team_data in enumerate(evaluated_teams):
+                                col_idx = idx % 3
+                                with leaderboard_cols[col_idx]:
+                                    medal = (
+                                        "🥇"
+                                        if idx == 0
+                                        else (
+                                            "🥈"
+                                            if idx == 1
+                                            else "🥉" if idx == 2 else "📊"
+                                        )
+                                    )
+                                    st.metric(
+                                        label=f"{medal} {team_data['team']}",
+                                        value=f"{team_data['score']}/100",
+                                    )
+
+                            st.markdown("---")
+                            st.markdown(
+                                "### 📊 Detailed Evaluation (View One at a Time)"
+                            )
+
+                            # Create tabs for each team with scores
+                            eval_tab_names = [
+                                f"{team_data['team']} ({team_data['score']}/100)"
+                                for team_data in evaluated_teams
+                            ]
+                            eval_tabs = st.tabs(eval_tab_names)
+
+                            # Display each team in its tab with full evaluation
+                            for eval_tab, team_data in zip(eval_tabs, evaluated_teams):
+                                with eval_tab:
+                                    display_team_response(
+                                        team_data["team"],
+                                        team_data["response_data"],
+                                        team_data["evaluation"],
+                                    )
+
+                            # Add button to re-evaluate
+                            st.markdown("---")
+                            col1, col2, col3 = st.columns([1, 2, 1])
+                            with col2:
+                                if st.button(
+                                    "🔄 Re-evaluate All Teams",
+                                    key=f"reeval_btn_{case_number}",
+                                    use_container_width=True,
+                                ):
+                                    st.session_state[eval_key] = False
+                                    st.session_state[f"eval_data_{case_number}"] = []
+                                    st.rerun()
 
     # Footer
     st.sidebar.markdown("---")
@@ -854,24 +1093,6 @@ def main():
     - AI-powered evaluation using Gemini
     """
     )
-
-    st.sidebar.markdown("---")
-    st.sidebar.markdown("### 📝 Submit Responses")
-    st.sidebar.markdown("Teams can submit their case responses at:")
-    st.sidebar.markdown("[**Tally Form Link**](https://tally.so/r/b5xGbZ)")
-    st.sidebar.caption(
-        "Form fields: Team Number, Team Name, Case, Management, Additional Tests/Labs"
-    )
-
-    st.sidebar.markdown("---")
-    st.sidebar.markdown("### 🔧 API Status")
-    st.sidebar.markdown(
-        f"**Tally API**: {'✅ Enabled' if USE_TALLY_API else '⚠️ Disabled (Demo Mode)'}"
-    )
-    st.sidebar.markdown("**Gemini AI**: ✅ Active")
-
-    if USE_TALLY_API:
-        st.sidebar.caption("Having API issues? Set USE_TALLY_API = False in app.py")
 
 
 if __name__ == "__main__":
