@@ -4,13 +4,13 @@ import requests
 from typing import Dict, List
 import os
 import time
-import time
 
 # Configure API Keys from Streamlit secrets
 # For local development: .streamlit/secrets.toml
 # For Streamlit Cloud: Add secrets in dashboard Settings > Secrets
 try:
     GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
+    GROQ_API_KEY = st.secrets.get("GROQ_API_KEY", "")
     TALLY_API_KEY = st.secrets.get("TALLY_API_KEY", "")
     TALLY_FORM_ID = st.secrets.get("TALLY_FORM_ID", "b5xGbZ")
     USE_TALLY_API = st.secrets.get("USE_TALLY_API", True)
@@ -18,6 +18,7 @@ except Exception as e:
     # Fallback to environment variables if secrets not available
     st.warning("⚠️ Secrets not configured. Using environment variables or demo mode.")
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+    GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
     TALLY_API_KEY = os.getenv("TALLY_API_KEY", "")
     TALLY_FORM_ID = os.getenv("TALLY_FORM_ID", "b5xGbZ")
     USE_TALLY_API = os.getenv("USE_TALLY_API", "false").lower() == "true"
@@ -274,74 +275,120 @@ def categorize_responses_by_case(
 def rate_response_with_gemini(
     case_description: str, management_guideline: str, team_response: str
 ) -> Dict:
-    """Use Gemini API to rate and score a team's response"""
+    """Use Groq API to rate and score a team's response"""
     max_retries = 3
-    retry_delay = 2  # Initial delay in seconds
+    retry_delay = 5  # Initial delay in seconds
 
     for attempt in range(max_retries):
         try:
-            prompt = f"""You are an expert medical educator evaluating resident physicians' case management responses.
+            prompt = f"""You are evaluating a medical resident's case response against a reference answer.
 
 **Case Background:**
 {case_description}
 
-**REFERENCE ANSWER - Evidence-Based Management Considerations:**
+**REFERENCE ANSWER (Evidence-Based Management):**
 {management_guideline}
 
-**Team's Response:**
+**Team's Response to Evaluate:**
 {team_response}
 
-EVALUATION INSTRUCTIONS:
-Score the team's response (0-100) based SPECIFICALLY on how well it aligns with the Management Considerations listed above. The score should reflect:
-- Coverage of key management points mentioned in the reference (40 points)
-- Accuracy and appropriateness of recommendations (30 points)
-- Clinical reasoning and safety considerations (20 points)
-- Completeness and organization (10 points)
+---
+STRICT EVALUATION PROTOCOL — follow every step:
 
-Compare the team's response directly against each point in the Management Considerations. Award higher scores for responses that address most or all of the reference points with appropriate clinical reasoning.
+**STEP 1 — CHECKLIST:** Read the Reference Answer above. List each distinct management point from the reference (number them 1, 2, 3...). For each point, mark whether the team's response addressed it: [HIT], [PARTIAL], or [MISSED].
 
-Provide:
-1. **Overall Score** (0-100): Based on alignment with Management Considerations
-2. **Strengths**: Specific management points they correctly addressed from the reference (bullet points)
-3. **Areas for Improvement**: How they could better align with the reference guidelines (bullet points)
-4. **Key Points Missed**: Management considerations from the reference that they did not address (bullet points)
-5. **Clinical Reasoning**: Assessment of their reasoning in relation to evidence-based guidelines (2-3 sentences)
+**STEP 2 — TALLY:** Count your HITs, PARTIALs, and MISSEDs.
 
-Format your response as:
-SCORE: [number]
+**STEP 3 — SCORE CALCULATION:**
+- Each HIT = full points, each PARTIAL = half points, each MISSED = 0
+- Base score = (HITs + 0.5×PARTIALs) / total points × 70  (covers 70 points)
+- Accuracy/safety penalty: deduct up to 20 points for incorrect, dangerous, or missing safety-critical recommendations
+- Organization bonus: up to 10 points for clear, well-structured, complete reasoning
+- Final score = base score + accuracy/safety + organization (0–100)
+
+**STEP 4 — SCORING RULES (strictly enforce):**
+- 80–100: Addresses nearly all reference points correctly with good reasoning
+- 60–79: Addresses most points but misses some important ones
+- 40–59: Addresses some points but misses half or more of the key recommendations
+- 20–39: Only addresses a few points; significant gaps in management
+- 0–19: Largely irrelevant, incorrect, or missing critical safety considerations
+
+**IMPORTANT**: Be discriminating. If the response is vague or generic without naming specific interventions, score it LOW (below 50). Do not give high scores just for using medical-sounding language.
+
+**OUTPUT FORMAT (use exactly this format):**
+
+CHECKLIST:
+1. [management point from reference] — [HIT/PARTIAL/MISSED]
+2. [management point from reference] — [HIT/PARTIAL/MISSED]
+(continue for all reference points)
+
+TALLY: [X] HITs, [Y] PARTIALs, [Z] MISSEDs out of [total] points
+
+SCORE: [number 0-100]
+
 STRENGTHS:
-- [point 1]
-- [point 2]
-...
+- [specific points correctly addressed]
 
 AREAS FOR IMPROVEMENT:
-- [point 1]
-- [point 2]
-...
+- [specific gaps or errors]
 
 KEY POINTS MISSED:
-- [point 1]
-- [point 2]
-...
+- [reference points not addressed]
 
 CLINICAL REASONING:
-[Your assessment]
+[2-3 sentences assessing quality of clinical reasoning]
 """
 
-            # Use Gemini REST API directly with v1 endpoint
-            url = f"https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
+            # Use Groq API with Llama 3.3 70B
+            url = "https://api.groq.com/openai/v1/chat/completions"
 
-            payload = {"contents": [{"parts": [{"text": prompt}]}]}
+            payload = {
+                "model": "llama-3.3-70b-versatile",
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a strict medical education evaluator. Your job is to critically assess "
+                            "resident physicians' responses against a reference answer. You must be rigorous and "
+                            "discriminating — scores should reflect the actual quality of the response. "
+                            "Do NOT inflate scores. A response that only partially addresses the reference "
+                            "should score 40-60. A response missing major points should score below 40. "
+                            "Only award high scores (80+) for responses that are thorough and accurate. "
+                            "Different teams should receive meaningfully different scores based on their responses."
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                "temperature": 0.1,
+                "max_tokens": 2048,
+            }
 
-            response = requests.post(url, json=payload)
+            headers = {
+                "Authorization": f"Bearer {GROQ_API_KEY}",
+                "Content-Type": "application/json",
+            }
+
+            response = requests.post(url, json=payload, headers=headers)
             response.raise_for_status()
 
             result = response.json()
-            evaluation_text = result["candidates"][0]["content"]["parts"][0]["text"]
+            evaluation_text = result["choices"][0]["message"]["content"]
 
             # Parse the response
             score_match = re.search(r"SCORE:\s*(\d+)", evaluation_text)
             score = int(score_match.group(1)) if score_match else 0
+
+            checklist_match = re.search(
+                r"CHECKLIST:(.*?)(?=TALLY:|SCORE:|\Z)",
+                evaluation_text,
+                re.DOTALL,
+            )
+            checklist = checklist_match.group(1).strip() if checklist_match else ""
+
+            tally_match = re.search(
+                r"TALLY:(.*?)(?=SCORE:|\Z)", evaluation_text, re.DOTALL
+            )
+            tally = tally_match.group(1).strip() if tally_match else ""
 
             strengths_match = re.search(
                 r"STRENGTHS:(.*?)(?=AREAS FOR IMPROVEMENT:|KEY POINTS MISSED:|CLINICAL REASONING:|\Z)",
@@ -373,6 +420,8 @@ CLINICAL REASONING:
 
             return {
                 "score": score,
+                "checklist": checklist,
+                "tally": tally,
                 "strengths": strengths,
                 "improvements": improvements,
                 "missed_points": missed,
@@ -394,6 +443,8 @@ CLINICAL REASONING:
                 st.error(f"Error rating response: {e}")
                 return {
                     "score": 0,
+                    "checklist": "",
+                    "tally": "",
                     "strengths": "Error occurred during evaluation",
                     "improvements": "",
                     "missed_points": "",
@@ -405,6 +456,8 @@ CLINICAL REASONING:
             st.error(f"Error rating response: {e}")
             return {
                 "score": 0,
+                "checklist": "",
+                "tally": "",
                 "strengths": "Error occurred during evaluation",
                 "improvements": "",
                 "missed_points": "",
@@ -415,6 +468,8 @@ CLINICAL REASONING:
     # If all retries failed (should not reach here, but for safety)
     return {
         "score": 0,
+        "checklist": "",
+        "tally": "",
         "strengths": "All retry attempts failed",
         "improvements": "",
         "missed_points": "",
@@ -464,6 +519,14 @@ def display_team_response(team_name: str, response_data: Dict, evaluation: Dict)
         if evaluation["missed_points"]:
             st.markdown("#### ⚠️ Key Points Missed")
             st.markdown(evaluation["missed_points"])
+
+    # Show checklist breakdown
+    if evaluation.get("checklist") or evaluation.get("tally"):
+        with st.expander("🔍 Scoring Breakdown (Checklist)", expanded=False):
+            if evaluation.get("tally"):
+                st.info(f"**Tally:** {evaluation['tally']}")
+            if evaluation.get("checklist"):
+                st.markdown(evaluation["checklist"])
 
     st.markdown("---")
 
