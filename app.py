@@ -3,6 +3,8 @@ import re
 import requests
 from typing import Dict, List
 import os
+import time
+import time
 
 # Configure API Keys from Streamlit secrets
 # For local development: .streamlit/secrets.toml
@@ -92,8 +94,10 @@ def parse_cases_file(file_path: str) -> List[Dict]:
             continue
         case_title = title_match.group(1).strip()
 
-        # Split by "Management Considerations:" to separate description from management
-        parts = re.split(r"\*\*Management Considerations:\*\*", block, maxsplit=1)
+        # Split by management section header to separate description from management
+        parts = re.split(
+            r"\*\*(?:Management Considerations|Management Plan):\*\*", block, maxsplit=1
+        )
 
         if len(parts) == 2:
             description_part = parts[0].strip()
@@ -271,8 +275,12 @@ def rate_response_with_gemini(
     case_description: str, management_guideline: str, team_response: str
 ) -> Dict:
     """Use Gemini API to rate and score a team's response"""
-    try:
-        prompt = f"""You are an expert medical educator evaluating resident physicians' case management responses.
+    max_retries = 3
+    retry_delay = 2  # Initial delay in seconds
+
+    for attempt in range(max_retries):
+        try:
+            prompt = f"""You are an expert medical educator evaluating resident physicians' case management responses.
 
 **Case Background:**
 {case_description}
@@ -320,66 +328,99 @@ CLINICAL REASONING:
 [Your assessment]
 """
 
-        # Use Gemini REST API directly with v1 endpoint
-        url = f"https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
+            # Use Gemini REST API directly with v1 endpoint
+            url = f"https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
 
-        payload = {"contents": [{"parts": [{"text": prompt}]}]}
+            payload = {"contents": [{"parts": [{"text": prompt}]}]}
 
-        response = requests.post(url, json=payload)
-        response.raise_for_status()
+            response = requests.post(url, json=payload)
+            response.raise_for_status()
 
-        result = response.json()
-        evaluation_text = result["candidates"][0]["content"]["parts"][0]["text"]
+            result = response.json()
+            evaluation_text = result["candidates"][0]["content"]["parts"][0]["text"]
 
-        # Parse the response
-        score_match = re.search(r"SCORE:\s*(\d+)", evaluation_text)
-        score = int(score_match.group(1)) if score_match else 0
+            # Parse the response
+            score_match = re.search(r"SCORE:\s*(\d+)", evaluation_text)
+            score = int(score_match.group(1)) if score_match else 0
 
-        strengths_match = re.search(
-            r"STRENGTHS:(.*?)(?=AREAS FOR IMPROVEMENT:|KEY POINTS MISSED:|CLINICAL REASONING:|\Z)",
-            evaluation_text,
-            re.DOTALL,
-        )
-        strengths = strengths_match.group(1).strip() if strengths_match else ""
+            strengths_match = re.search(
+                r"STRENGTHS:(.*?)(?=AREAS FOR IMPROVEMENT:|KEY POINTS MISSED:|CLINICAL REASONING:|\Z)",
+                evaluation_text,
+                re.DOTALL,
+            )
+            strengths = strengths_match.group(1).strip() if strengths_match else ""
 
-        improvements_match = re.search(
-            r"AREAS FOR IMPROVEMENT:(.*?)(?=KEY POINTS MISSED:|CLINICAL REASONING:|\Z)",
-            evaluation_text,
-            re.DOTALL,
-        )
-        improvements = improvements_match.group(1).strip() if improvements_match else ""
+            improvements_match = re.search(
+                r"AREAS FOR IMPROVEMENT:(.*?)(?=KEY POINTS MISSED:|CLINICAL REASONING:|\Z)",
+                evaluation_text,
+                re.DOTALL,
+            )
+            improvements = (
+                improvements_match.group(1).strip() if improvements_match else ""
+            )
 
-        missed_match = re.search(
-            r"KEY POINTS MISSED:(.*?)(?=CLINICAL REASONING:|\Z)",
-            evaluation_text,
-            re.DOTALL,
-        )
-        missed = missed_match.group(1).strip() if missed_match else ""
+            missed_match = re.search(
+                r"KEY POINTS MISSED:(.*?)(?=CLINICAL REASONING:|\Z)",
+                evaluation_text,
+                re.DOTALL,
+            )
+            missed = missed_match.group(1).strip() if missed_match else ""
 
-        reasoning_match = re.search(
-            r"CLINICAL REASONING:(.*?)(?=\Z)", evaluation_text, re.DOTALL
-        )
-        reasoning = reasoning_match.group(1).strip() if reasoning_match else ""
+            reasoning_match = re.search(
+                r"CLINICAL REASONING:(.*?)(?=\Z)", evaluation_text, re.DOTALL
+            )
+            reasoning = reasoning_match.group(1).strip() if reasoning_match else ""
 
-        return {
-            "score": score,
-            "strengths": strengths,
-            "improvements": improvements,
-            "missed_points": missed,
-            "clinical_reasoning": reasoning,
-            "full_evaluation": evaluation_text,
-        }
+            return {
+                "score": score,
+                "strengths": strengths,
+                "improvements": improvements,
+                "missed_points": missed,
+                "clinical_reasoning": reasoning,
+                "full_evaluation": evaluation_text,
+            }
 
-    except Exception as e:
-        st.error(f"Error rating response: {e}")
-        return {
-            "score": 0,
-            "strengths": "Error occurred during evaluation",
-            "improvements": "",
-            "missed_points": "",
-            "clinical_reasoning": "",
-            "full_evaluation": f"Error: {e}",
-        }
+        except requests.exceptions.HTTPError as e:
+            # Handle 429 (rate limit) errors with retry
+            if e.response.status_code == 429 and attempt < max_retries - 1:
+                wait_time = retry_delay * (2**attempt)  # Exponential backoff
+                st.warning(
+                    f"⏳ Rate limit reached. Retrying in {wait_time} seconds... (Attempt {attempt + 1}/{max_retries})"
+                )
+                time.sleep(wait_time)
+                continue  # Retry
+            else:
+                # Final attempt failed or other HTTP error
+                st.error(f"Error rating response: {e}")
+                return {
+                    "score": 0,
+                    "strengths": "Error occurred during evaluation",
+                    "improvements": "",
+                    "missed_points": "",
+                    "clinical_reasoning": "",
+                    "full_evaluation": f"Error: {e}",
+                }
+
+        except Exception as e:
+            st.error(f"Error rating response: {e}")
+            return {
+                "score": 0,
+                "strengths": "Error occurred during evaluation",
+                "improvements": "",
+                "missed_points": "",
+                "clinical_reasoning": "",
+                "full_evaluation": f"Error: {e}",
+            }
+
+    # If all retries failed (should not reach here, but for safety)
+    return {
+        "score": 0,
+        "strengths": "All retry attempts failed",
+        "improvements": "",
+        "missed_points": "",
+        "clinical_reasoning": "",
+        "full_evaluation": "Error: Maximum retries exceeded",
+    }
 
 
 def display_team_response(team_name: str, response_data: Dict, evaluation: Dict):
@@ -746,174 +787,7 @@ def main():
                 all_responses = fetch_tally_responses()
 
                 if not all_responses:
-                    # Show sample/demo response
-                    st.markdown("### 📝 Demo Mode - Sample Responses")
-                    st.info(
-                        "Showing sample team responses for demonstration purposes. Use the 'Test with Custom Response' section above to evaluate actual responses."
-                    )
-
-                    # Generate demo responses relevant to the case
-                    demo_responses = [
-                        {
-                            "team": "Demo Team Alpha",
-                            "response": """For this patient, I would:
-1. Start with Metformin 500mg twice daily as first-line therapy
-2. Implement lifestyle modifications including diet and exercise
-3. Schedule follow-up in 3 months to reassess HbA1c
-4. Consider referral to diabetes education
-5. Monitor for complications""",
-                            "submitted_at": "2026-02-13",
-                        },
-                        {
-                            "team": "Demo Team Beta",
-                            "response": """My management approach:
-- Initiate metformin and titrate to maximum tolerated dose
-- Refer to DSMES for comprehensive education
-- Consider adding GLP-1 RA if cardiovascular disease present
-- Implement evidence-based lifestyle interventions
-- Monitor HbA1c quarterly, adjust therapy as needed""",
-                            "submitted_at": "2026-02-13",
-                        },
-                    ]
-
-                    # First, display all demo team responses immediately
-                    st.markdown("---")
-                    st.markdown("### 📋 Demo Team Responses")
-
-                    # Create tabs for each team (without scores initially)
-                    tab_names = [demo["team"] for demo in demo_responses]
-                    tabs = st.tabs(tab_names)
-
-                    # Display each team's response in its tab
-                    for tab, demo_response in zip(tabs, demo_responses):
-                        with tab:
-                            st.markdown(f"### 👥 {demo_response['team']}")
-                            with st.expander("📝 Team Response", expanded=True):
-                                st.markdown(demo_response["response"])
-
-                            if demo_response.get("submitted_at"):
-                                st.caption(
-                                    f"Submitted: {demo_response['submitted_at']}"
-                                )
-
-                    # AI Evaluation Section
-                    st.markdown("---")
-                    st.markdown("### 🤖 AI Evaluation")
-
-                    # Use session state for demo evaluation
-                    demo_eval_key = f"demo_evaluated_case_{selected_case_idx}"
-                    if demo_eval_key not in st.session_state:
-                        st.session_state[demo_eval_key] = False
-                        st.session_state[f"demo_eval_data_{selected_case_idx}"] = []
-
-                    # Button to trigger evaluation
-                    if not st.session_state[demo_eval_key]:
-                        st.info(
-                            f"💡 Click below to evaluate **all {len(demo_responses)} demo team(s)** at once using AI."
-                        )
-
-                        col1, col2, col3 = st.columns([1, 2, 1])
-                        with col2:
-                            if st.button(
-                                f"🚀 Evaluate All {len(demo_responses)} Team(s) Now",
-                                key=f"demo_eval_btn_{selected_case_idx}",
-                                type="primary",
-                                use_container_width=True,
-                            ):
-                                evaluated_teams = []
-
-                            # Show progress
-                            progress_text = st.empty()
-                            progress_bar = st.progress(0)
-
-                            for idx, demo_response in enumerate(demo_responses):
-                                progress_text.text(
-                                    f"Evaluating {demo_response['team']}... ({idx+1}/{len(demo_responses)})"
-                                )
-                                progress_bar.progress((idx + 1) / len(demo_responses))
-
-                                evaluation = rate_response_with_gemini(
-                                    selected_case["description"],
-                                    selected_case["management"],
-                                    demo_response["response"],
-                                )
-                                evaluated_teams.append(
-                                    {
-                                        "team": demo_response["team"],
-                                        "response_data": demo_response,
-                                        "evaluation": evaluation,
-                                        "score": evaluation["score"],
-                                    }
-                                )
-
-                            # Clear progress indicators
-                            progress_text.empty()
-                            progress_bar.empty()
-
-                            # Sort by score
-                            evaluated_teams.sort(key=lambda x: x["score"], reverse=True)
-
-                            # Store in session state
-                            st.session_state[demo_eval_key] = True
-                            st.session_state[f"demo_eval_data_{selected_case_idx}"] = (
-                                evaluated_teams
-                            )
-                            st.rerun()
-
-                    # Display evaluation results if available
-                    if st.session_state[demo_eval_key]:
-                        evaluated_teams = st.session_state[
-                            f"demo_eval_data_{selected_case_idx}"
-                        ]
-
-                        # Display leaderboard
-                        st.success(
-                            f"✅ AI evaluation completed for all {len(evaluated_teams)} team(s)!"
-                        )
-                        st.markdown("### 🏆 Leaderboard")
-
-                        leaderboard_cols = st.columns(len(evaluated_teams))
-                        for idx, team_data in enumerate(evaluated_teams):
-                            with leaderboard_cols[idx]:
-                                medal = "🥇" if idx == 0 else "🥈"
-                                st.metric(
-                                    label=f"{medal} {team_data['team']}",
-                                    value=f"{team_data['score']}/100",
-                                )
-
-                        st.markdown("---")
-                        st.markdown("### 📊 Detailed Evaluation (View One at a Time)")
-
-                        # Create tabs for each team with scores
-                        eval_tab_names = [
-                            f"{team_data['team']} ({team_data['score']}/100)"
-                            for team_data in evaluated_teams
-                        ]
-                        eval_tabs = st.tabs(eval_tab_names)
-
-                        # Display each team in its tab
-                        for eval_tab, team_data in zip(eval_tabs, evaluated_teams):
-                            with eval_tab:
-                                display_team_response(
-                                    team_data["team"],
-                                    team_data["response_data"],
-                                    team_data["evaluation"],
-                                )
-
-                        # Add button to re-evaluate
-                        st.markdown("---")
-                        col1, col2, col3 = st.columns([1, 2, 1])
-                        with col2:
-                            if st.button(
-                                "🔄 Re-evaluate All Teams",
-                                key=f"demo_reeval_btn_{selected_case_idx}",
-                                use_container_width=True,
-                            ):
-                                st.session_state[demo_eval_key] = False
-                                st.session_state[
-                                    f"demo_eval_data_{selected_case_idx}"
-                                ] = []
-                                st.rerun()
+                    st.info("No team responses have been submitted yet.")
 
                 else:
                     # Filter responses for current case

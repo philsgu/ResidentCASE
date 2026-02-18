@@ -541,6 +541,8 @@ If fasting glucose reaches target but HbA1c remains >7% or postprandial glucose 
 - Blood pressure: 128/76 mmHg
     
 
+**Management Considerations:**
+
 **Clinical Assessment and Rationale for Bolus Insulin:**
 
 This patient demonstrates **clear indications for prandial insulin intensification**: fasting glucose at target but HbA1c >8%, significant postprandial hyperglycemia (>180 mg/dL), and signs of overbasalization with a bedtime-to-morning differential >50 mg/dL.\[1\]\[2\] The basal insulin dose of 0.6 units/kg/day exceeds the typical threshold of 0.5 units/kg/day where prandial coverage should be considered.\[2\]
